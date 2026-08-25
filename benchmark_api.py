@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """AI Benchmark API runner.
 
-Supports OpenRouter first; the test set and evaluator are shared with local runs.
+OpenRouter runner with explicit interactive model selection. By default it
+never runs the benchmark against every discovered model: the user selects
+one model from a numbered list before any inference request is made.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ PROMPTS_FILE = ROOT / "prompts" / "benchmark.json"
 RESULTS_DIR = ROOT / "resultados"
 DEFAULT_TIMEOUT = int(os.getenv("AI_BENCHMARK_TIMEOUT", "180"))
 DEFAULT_MAX_TOKENS = int(os.getenv("AI_BENCHMARK_MAX_TOKENS", "2048"))
+FREE_DAILY_LIMIT = 50
 
 
 def load_tests(path: Path) -> list[dict[str, Any]]:
@@ -35,16 +38,59 @@ def load_tests(path: Path) -> list[dict[str, Any]]:
 
 
 def select_models(models: list[dict[str, Any]], requested: list[str] | None, limit: int | None) -> list[dict[str, Any]]:
+    by_id = {m.get("id"): m for m in models}
     if requested:
-        by_id = {m.get("id"): m for m in models}
         selected = []
         for model_id in requested:
             if model_id not in by_id:
                 raise SystemExit(f"Modelo não encontrado no catálogo OpenRouter: {model_id}")
             selected.append(by_id[model_id])
         return selected
+    if limit:
+        return sorted(models, key=lambda m: m.get("id", ""))[:limit]
+    return []
+
+
+def model_price(model: dict[str, Any]) -> str:
+    pricing = model.get("pricing") or {}
+    prompt = pricing.get("prompt")
+    completion = pricing.get("completion")
+    if prompt == "0" and completion == "0":
+        return "FREE"
+    return f"in={prompt} / out={completion}"
+
+
+def print_model_menu(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
     models = sorted(models, key=lambda m: m.get("id", ""))
-    return models[:limit] if limit else models
+    print("\nModelos OpenRouter disponíveis para teste")
+    print("=" * 90)
+    print(f"Cota de referência: até {FREE_DAILY_LIMIT} requisições/dia no plano Free.")
+    print("Cada teste do benchmark faz 1 requisição. Nada será executado até a escolha.\n")
+    for index, model in enumerate(models, 1):
+        model_id = model.get("id", "<sem id>")
+        name = model.get("name") or model_id
+        context = model.get("context_length") or "?"
+        print(f"[{index:02d}] {name}")
+        print(f"     id: {model_id}")
+        print(f"     contexto: {context} | preço: {model_price(model)}")
+    print("=" * 90)
+    print("Digite o número do modelo para selecionar apenas esse modelo.")
+    print("Digite 0 para cancelar.")
+
+    while True:
+        raw = input("\nModelo: ").strip()
+        try:
+            choice = int(raw)
+        except ValueError:
+            print("Digite um número válido.")
+            continue
+        if choice == 0:
+            raise SystemExit("Execução cancelada pelo usuário.")
+        if 1 <= choice <= len(models):
+            selected = models[choice - 1]
+            print(f"Selecionado: {selected.get('id')}")
+            return [selected]
+        print(f"Escolha um número entre 1 e {len(models)}, ou 0 para cancelar.")
 
 
 def token_value(usage: dict[str, Any], key: str) -> int | float:
@@ -129,8 +175,9 @@ def run_model(args: argparse.Namespace, model_meta: dict[str, Any], tests: list[
 def main() -> None:
     parser = argparse.ArgumentParser(description="AI Benchmark via OpenRouter.")
     parser.add_argument("--model", action="append", help="Modelo OpenRouter; pode repetir a opção.")
-    parser.add_argument("--free-only", action="store_true", help="Seleciona somente modelos com preço $0/$0 no catálogo.")
-    parser.add_argument("--limit-models", type=int, help="Limita modelos descobertos automaticamente.")
+    parser.add_argument("--free-only", action="store_true", help="Mostra somente modelos com preço $0/$0 no catálogo.")
+    parser.add_argument("--limit-models", type=int, help="Seleciona automaticamente até N modelos; use somente em execução controlada.")
+    parser.add_argument("--all", action="store_true", help="Executa em todos os modelos descobertos. Evite no plano Free.")
     parser.add_argument("--domain", action="append", help="Domínio: Moodle, Python ou n8n; pode repetir.")
     parser.add_argument("--limit-tests", type=int, help="Limita o número total de testes nesta execução.")
     parser.add_argument("--base", default=os.getenv("OPENROUTER_BASE", openrouter.DEFAULT_BASE))
@@ -157,9 +204,30 @@ def main() -> None:
         raise SystemExit("Nenhum teste selecionado.")
 
     catalog = openrouter.list_models(args.base, args.timeout, free_only=args.free_only)
-    models = select_models(catalog, args.model, args.limit_models)
-    if not models:
-        raise SystemExit("Nenhum modelo selecionado.")
+    if not catalog:
+        raise SystemExit("Nenhum modelo encontrado no catálogo OpenRouter.")
+
+    if args.model:
+        models = select_models(catalog, args.model, args.limit_models)
+    elif args.all:
+        models = sorted(catalog, key=lambda m: m.get("id", ""))
+    elif args.limit_models:
+        models = select_models(catalog, None, args.limit_models)
+    else:
+        models = print_model_menu(catalog)
+
+    estimated_requests = len(models) * len(tests)
+    print(f"\nExecução planejada: {len(models)} modelo(s) × {len(tests)} teste(s) = {estimated_requests} requisição(ões).")
+    if args.free_only and estimated_requests > FREE_DAILY_LIMIT:
+        raise SystemExit(
+            f"Execução bloqueada: {estimated_requests} requisições excedem a referência de {FREE_DAILY_LIMIT}/dia do plano Free. "
+            "Use --limit-tests, selecione menos testes ou execute em outro dia."
+        )
+    if args.free_only:
+        print(f"Atenção: o plano Free do OpenRouter tem limite diário de {FREE_DAILY_LIMIT} requisições e limite por minuto. Esta execução não consulta o saldo restante da conta.")
+        confirmation = input("Continuar? [s/N]: ").strip().lower()
+        if confirmation not in {"s", "sim", "y", "yes"}:
+            raise SystemExit("Execução cancelada pelo usuário.")
 
     print(f"AI Benchmark API — {len(tests)} testes / {len(models)} modelo(s)")
     print(f"OpenRouter: {args.base}")
@@ -180,6 +248,8 @@ def main() -> None:
             "reasoning_effort": args.reasoning_effort,
             "free_only": args.free_only,
             "test_count": len(tests),
+            "model_count": len(models),
+            "estimated_requests": estimated_requests,
         },
         "method": "heuristic-v0.1",
         "models": [],
