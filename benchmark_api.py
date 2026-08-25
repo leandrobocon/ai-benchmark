@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """AI Benchmark API runner.
 
-OpenRouter runner with explicit interactive model selection. By default it
-never runs the benchmark against every discovered model: the user selects
-one model from a numbered list before any inference request is made.
+OpenRouter runner with explicit interactive model and test selection. By default
+it never runs the benchmark against every discovered model or every test: the
+user selects one model and a test scope before any inference request is made.
 """
 from __future__ import annotations
 
@@ -91,6 +91,89 @@ def print_model_menu(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
             print(f"Selecionado: {selected.get('id')}")
             return [selected]
         print(f"Escolha um número entre 1 e {len(models)}, ou 0 para cancelar.")
+
+
+def print_test_menu(tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    domains = {}
+    for test in tests:
+        domains.setdefault(test["domain"], []).append(test)
+
+    print("\nTestes disponíveis")
+    print("=" * 90)
+    print("[1] Todos os testes")
+    domain_items = list(domains.items())
+    for index, (domain, domain_tests) in enumerate(domain_items, 2):
+        print(f"[{index}] {domain} ({len(domain_tests)} testes)")
+    print(f"[{len(domain_items) + 2}] Escolher testes individualmente")
+    print("[0] Cancelar")
+    print("=" * 90)
+
+    while True:
+        raw = input("\nOpção de testes: ").strip()
+        try:
+            choice = int(raw)
+        except ValueError:
+            print("Digite um número válido.")
+            continue
+        if choice == 0:
+            raise SystemExit("Execução cancelada pelo usuário.")
+        if choice == 1:
+            return tests
+        domain_index = choice - 2
+        if 0 <= domain_index < len(domain_items):
+            domain, domain_tests = domain_items[domain_index]
+            return domain_tests
+        if choice == len(domain_items) + 2:
+            return select_individual_tests(tests)
+        print("Opção inválida.")
+
+
+def select_individual_tests(tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    print("\nSeleção individual")
+    print("Digite os números separados por vírgula. Exemplo: 1,4,7")
+    print("Também é possível usar intervalos. Exemplo: 1-5,8,12-14")
+    print("Digite 0 para cancelar.")
+    for index, test in enumerate(tests, 1):
+        print(f"[{index:02d}] {test['domain']:<8} {test['id']:<14} {test.get('type', '')}")
+
+    while True:
+        raw = input("\nTestes: ").strip()
+        if raw == "0":
+            raise SystemExit("Execução cancelada pelo usuário.")
+        try:
+            selected_numbers = parse_selection(raw, len(tests))
+        except ValueError as exc:
+            print(f"Seleção inválida: {exc}")
+            continue
+        if not selected_numbers:
+            print("Nenhum teste selecionado.")
+            continue
+        selected = [tests[number - 1] for number in selected_numbers]
+        print(f"Selecionados: {len(selected)} teste(s).")
+        return selected
+
+
+def parse_selection(raw: str, maximum: int) -> list[int]:
+    values: set[int] = set()
+    for part in raw.replace(" ", "").split(","):
+        if not part:
+            continue
+        if "-" in part:
+            pieces = part.split("-", 1)
+            if len(pieces) != 2 or not pieces[0].isdigit() or not pieces[1].isdigit():
+                raise ValueError(f"intervalo inválido: {part}")
+            start, end = int(pieces[0]), int(pieces[1])
+            if start > end:
+                start, end = end, start
+            values.update(range(start, end + 1))
+        elif part.isdigit():
+            values.add(int(part))
+        else:
+            raise ValueError(f"valor inválido: {part}")
+    invalid = sorted(value for value in values if value < 1 or value > maximum)
+    if invalid:
+        raise ValueError(f"número(s) fora do intervalo 1-{maximum}: {invalid}")
+    return sorted(values)
 
 
 def token_value(usage: dict[str, Any], key: str) -> int | float:
@@ -216,8 +299,14 @@ def main() -> None:
     else:
         models = print_model_menu(catalog)
 
-    estimated_requests = len(models) * len(tests)
-    print(f"\nExecução planejada: {len(models)} modelo(s) × {len(tests)} teste(s) = {estimated_requests} requisição(ões).")
+    if args.domain or args.limit_tests:
+        # Command-line filters intentionally remain authoritative when supplied.
+        selected_tests = tests
+    else:
+        selected_tests = print_test_menu(tests)
+
+    estimated_requests = len(models) * len(selected_tests)
+    print(f"\nExecução planejada: {len(models)} modelo(s) × {len(selected_tests)} teste(s) = {estimated_requests} requisição(ões).")
     if args.free_only and estimated_requests > FREE_DAILY_LIMIT:
         raise SystemExit(
             f"Execução bloqueada: {estimated_requests} requisições excedem a referência de {FREE_DAILY_LIMIT}/dia do plano Free. "
@@ -229,7 +318,7 @@ def main() -> None:
         if confirmation not in {"s", "sim", "y", "yes"}:
             raise SystemExit("Execução cancelada pelo usuário.")
 
-    print(f"AI Benchmark API — {len(tests)} testes / {len(models)} modelo(s)")
+    print(f"AI Benchmark API — {len(selected_tests)} testes / {len(models)} modelo(s)")
     print(f"OpenRouter: {args.base}")
     print(f"Parâmetros: temperature={args.temperature}, top_p={args.top_p}, top_k={args.top_k}, seed={args.seed}, max_tokens={args.max_tokens}, reasoning_effort={args.reasoning_effort}")
 
@@ -247,7 +336,7 @@ def main() -> None:
             "seed": args.seed,
             "reasoning_effort": args.reasoning_effort,
             "free_only": args.free_only,
-            "test_count": len(tests),
+            "test_count": len(selected_tests),
             "model_count": len(models),
             "estimated_requests": estimated_requests,
         },
@@ -256,7 +345,7 @@ def main() -> None:
     }
     for model_meta in models:
         print(f"\n== {model_meta['id']} ==")
-        output["models"].append(run_model(args, model_meta, tests))
+        output["models"].append(run_model(args, model_meta, selected_tests))
 
     RESULTS_DIR.mkdir(exist_ok=True)
     filename = RESULTS_DIR / f"api-openrouter-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
