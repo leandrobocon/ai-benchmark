@@ -77,12 +77,20 @@ def get_models():
 
 def load_model(mid):
     try:
-        return requests.post(f"{BASE}/api/v1/models/load", json={"model":mid}, timeout=300).status_code == 200
+        r = requests.post(f"{BASE}/api/v1/models/load", json={"model":mid}, timeout=300)
+        if r.status_code == 200:
+            time.sleep(5)
+            try:
+                requests.get(f"{BASE}/v1/models", timeout=10)
+            except: pass
+            return True
+        return False
     except: return False
 
 def unload_model(mid):
-    try: requests.post(f"{BASE}/api/v1/models/unload", json={"model":mid}, timeout=30)
+    try: requests.post(f"{BASE}/api/v1/models/unload", json={"model":mid}, timeout=60)
     except: pass
+    time.sleep(5)
 
 def chat(mid, prompt):
     payload = {
@@ -93,26 +101,30 @@ def chat(mid, prompt):
         ],
         "temperature": 0.2, "max_tokens": MAX_TOK, "stream": False,
     }
-    t0 = time.time()
-    try:
-        r = requests.post(f"{BASE}/v1/chat/completions", json=payload, timeout=TIMEOUT)
-        e = time.time()-t0
-        if r.status_code != 200: return {"error": f"HTTP {r.status_code}", "elapsed": e}
-        d = r.json()
-        c = d["choices"][0]["message"]["content"]
-        u = d.get("usage",{})
-        s = d.get("stats",{})
-        return {
-            "content": c,
-            "prompt_tokens": u.get("prompt_tokens",0),
-            "completion_tokens": u.get("completion_tokens",0),
-            "tokens_per_second": s.get("tokens_per_second",0),
-            "time_to_first_token": s.get("time_to_first_token",0),
-            "generation_time": s.get("generation_time",e),
-            "elapsed": e,
-        }
-    except Exception as ex:
-        return {"error": str(ex), "elapsed": time.time()-t0}
+    for attempt in range(3):
+        t0 = time.time()
+        try:
+            r = requests.post(f"{BASE}/v1/chat/completions", json=payload, timeout=TIMEOUT)
+            e = time.time()-t0
+            if r.status_code != 200:
+                if attempt < 2: time.sleep(5); continue
+                return {"error": f"HTTP {r.status_code}", "elapsed": e}
+            d = r.json()
+            c = d["choices"][0]["message"]["content"]
+            u = d.get("usage",{})
+            s = d.get("stats",{})
+            return {
+                "content": c,
+                "prompt_tokens": u.get("prompt_tokens",0),
+                "completion_tokens": u.get("completion_tokens",0),
+                "tokens_per_second": s.get("tokens_per_second",0),
+                "time_to_first_token": s.get("time_to_first_token",0),
+                "generation_time": s.get("generation_time",e),
+                "elapsed": e,
+            }
+        except Exception as ex:
+            if attempt < 2: time.sleep(5); continue
+            return {"error": str(ex), "elapsed": time.time()-t0}
 
 def evaluate(response, test):
     cl = response.lower()
@@ -229,7 +241,8 @@ def main():
 
         print(f"\n  ⏳ Descarregando...", end=" ", flush=True)
         unload_model(mid)
-        print("✅")
+        print("✅ Aguardando memória...")
+        time.sleep(10)
 
         am = sum(scores_m)/len(scores_m) if scores_m else 0
         ap = sum(scores_p)/len(scores_p) if scores_p else 0

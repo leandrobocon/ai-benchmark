@@ -50,7 +50,7 @@ PROMPTS = [
     {"id":"n05","d":"n8n ","p":"Workflow n8n: nota>=7 aprova, >=5 recuperação, <5 reprovado. Use IF node.","k":["IF","condition","value","true","false","email"],"code":False},
     {"id":"n06","d":"n8n ","p":"Tratar erros em n8n: Error Trigger, retry, Error Workflow, Stop And Error.","k":["errorTrigger","retryOnFail","Error Workflow","stopAndError","errorMessage"],"code":False},
     {"id":"n07","d":"n8n ","p":"Workflow n8n: processar 100 alunos com loop Split In Batches. Buscar nota, calcular média.","k":["SplitInBatches","batch","loop","item","json","merge"],"code":False},
-    {"id":"n8n ","p":"Credenciais seguras no n8n: criar credential customizada para API Moodle e usar em HTTP Request.","k":["credential","authentication","header","generic","oauth","apiKey"],"code":False},
+    {"id":"n08","d":"n8n ","p":"Credenciais seguras no n8n: criar credential customizada para API Moodle e usar em HTTP Request.","k":["credential","authentication","header","generic","oauth","apiKey"],"code":False},
     {"id":"n09","d":"n8n ","p":"Workflow n8n diário às 8h: buscar alunos com nota baixa no Moodle e email alerta ao professor.","k":["scheduleTrigger","rule","interval","cron","hour","email","moodle"],"code":False},
     {"id":"n10","d":"n8n ","p":"Workflow n8n com AI Agent: Webhook → LLM responde → salva no banco. AI Agent com tool.","k":["aiAgent","openAi","model","prompt","tool","memory","chatModel"],"code":False},
 ]
@@ -70,15 +70,22 @@ def models():
 def load(mid):
     try:
         r = requests.post(f"{BASE}/api/v1/models/load", json={"model":mid}, timeout=300)
-        return r.status_code == 200
+        if r.status_code == 200:
+            time.sleep(5)
+            try:
+                requests.get(f"{BASE}/v1/models", timeout=10)
+            except: pass
+            return True
+        return False
     except:
         return False
 
 def unload(mid):
     try:
-        requests.post(f"{BASE}/api/v1/models/unload", json={"model":mid}, timeout=30)
+        requests.post(f"{BASE}/api/v1/models/unload", json={"model":mid}, timeout=60)
     except:
         pass
+    time.sleep(5)
 
 def chat(mid, prompt):
     payload = {
@@ -91,27 +98,30 @@ def chat(mid, prompt):
         "max_tokens": MAX_TOK,
         "stream": False,
     }
-    t0 = time.time()
-    try:
-        r = requests.post(f"{BASE}/v1/chat/completions", json=payload, timeout=TIMEOUT)
-        elapsed = time.time()-t0
-        if r.status_code != 200:
-            return {"error": f"HTTP {r.status_code}", "elapsed": elapsed}
-        d = r.json()
-        content = d["choices"][0]["message"]["content"]
-        usage = d.get("usage",{})
-        stats = d.get("stats",{})
-        return {
-            "content": content,
-            "prompt_tokens": usage.get("prompt_tokens",0),
-            "completion_tokens": usage.get("completion_tokens",0),
-            "tokens_per_second": stats.get("tokens_per_second",0),
-            "time_to_first_token": stats.get("time_to_first_token",0),
-            "generation_time": stats.get("generation_time",elapsed),
-            "elapsed": elapsed,
-        }
-    except Exception as e:
-        return {"error": str(e), "elapsed": time.time()-t0}
+    for attempt in range(3):
+        t0 = time.time()
+        try:
+            r = requests.post(f"{BASE}/v1/chat/completions", json=payload, timeout=TIMEOUT)
+            elapsed = time.time()-t0
+            if r.status_code != 200:
+                if attempt < 2: time.sleep(5); continue
+                return {"error": f"HTTP {r.status_code}", "elapsed": elapsed}
+            d = r.json()
+            content = d["choices"][0]["message"]["content"]
+            usage = d.get("usage",{})
+            stats = d.get("stats",{})
+            return {
+                "content": content,
+                "prompt_tokens": usage.get("prompt_tokens",0),
+                "completion_tokens": usage.get("completion_tokens",0),
+                "tokens_per_second": stats.get("tokens_per_second",0),
+                "time_to_first_token": stats.get("time_to_first_token",0),
+                "generation_time": stats.get("generation_time",elapsed),
+                "elapsed": elapsed,
+            }
+        except Exception as e:
+            if attempt < 2: time.sleep(5); continue
+            return {"error": str(e), "elapsed": time.time()-t0}
 
 def evaluate(response, test):
     cl = response.lower()
@@ -226,7 +236,8 @@ def main():
         # Descarregar
         print(f"\n  ⏳ Descarregando...", end=" ", flush=True)
         unload(mid)
-        print("✅")
+        print("✅ Aguardando memória...")
+        time.sleep(10)
 
         # Resumo
         am = sum(scores_m)/len(scores_m) if scores_m else 0

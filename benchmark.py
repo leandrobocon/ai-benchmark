@@ -20,7 +20,7 @@ except ImportError:
 
 # ── Configuração ──────────────────────────────────────────────
 LMSTUDIO_BASE = "http://localhost:1234"
-API_TIMEOUT = 120  # segundos máximo de espera por resposta
+API_TIMEOUT = 180  # segundos máximo de espera por resposta
 WARMUP_RUNS = 1
 MEASURE_RUNS = 2
 MAX_TOKENS = 2048
@@ -322,7 +322,13 @@ def load_model(model_id: str) -> bool:
             json={"model": model_id},
             timeout=300,
         )
-        return r.status_code == 200
+        if r.status_code == 200:
+            time.sleep(5)
+            try:
+                requests.get(f"{LMSTUDIO_BASE}/v1/models", timeout=10)
+            except: pass
+            return True
+        return False
     except Exception:
         return False
 
@@ -333,10 +339,12 @@ def unload_model(model_id: str) -> bool:
         r = requests.post(
             f"{LMSTUDIO_BASE}/api/v1/models/unload",
             json={"model": model_id},
-            timeout=30,
+            timeout=60,
         )
+        time.sleep(5)
         return r.status_code == 200
     except Exception:
+        time.sleep(5)
         return False
 
 
@@ -353,35 +361,43 @@ def chat_completion(model_id: str, prompt: str) -> dict:
         "stream": False,
     }
 
-    start = time.time()
-    try:
-        r = requests.post(
-            f"{LMSTUDIO_BASE}/v1/chat/completions",
-            json=payload,
-            timeout=API_TIMEOUT,
-        )
-        elapsed = time.time() - start
+    start_total = time.time()
+    for attempt in range(3):
+        start = time.time()
+        try:
+            r = requests.post(
+                f"{LMSTUDIO_BASE}/v1/chat/completions",
+                json=payload,
+                timeout=API_TIMEOUT,
+            )
+            elapsed = time.time() - start
 
-        if r.status_code != 200:
-            return {"error": f"HTTP {r.status_code}", "elapsed": elapsed}
+            if r.status_code != 200:
+                if attempt < 2:
+                    time.sleep(5)
+                    continue
+                return {"error": f"HTTP {r.status_code}", "elapsed": elapsed}
 
-        data = r.json()
-        content = data["choices"][0]["message"]["content"]
-        usage = data.get("usage", {})
-        stats = data.get("stats", {})
+            data = r.json()
+            content = data["choices"][0]["message"]["content"]
+            usage = data.get("usage", {})
+            stats = data.get("stats", {})
 
-        return {
-            "content": content,
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-            "tokens_per_second": stats.get("tokens_per_second", 0),
-            "time_to_first_token": stats.get("time_to_first_token", 0),
-            "generation_time": stats.get("generation_time", elapsed),
-            "elapsed": elapsed,
-        }
-    except Exception as e:
-        return {"error": str(e), "elapsed": time.time() - start}
+            return {
+                "content": content,
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+                "tokens_per_second": stats.get("tokens_per_second", 0),
+                "time_to_first_token": stats.get("time_to_first_token", 0),
+                "generation_time": stats.get("generation_time", elapsed),
+                "elapsed": elapsed,
+            }
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(5)
+                continue
+            return {"error": str(e), "elapsed": time.time() - start_total}
 
 
 def evaluate_quality(response: str, test: dict) -> dict:
@@ -681,7 +697,8 @@ def main():
         # Descarregar modelo
         print(f"\n  ⏳ Descarregando modelo...")
         unload_model(model_id)
-        print(f"  ✅ Modelo descarregado.\n")
+        print(f"  ✅ Modelo descarregado. Aguardando memória...")
+        time.sleep(10)
 
         # Salvar resultado parcial
         partial_file = os.path.join(RESULTS_DIR, f"partial_{model_id.replace('/', '_')}.json")
