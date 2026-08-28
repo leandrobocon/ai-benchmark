@@ -39,6 +39,11 @@ def load_rows() -> list[dict]:
                 continue
 
             summary = model.get("summary", {}) or {}
+            overall = number(summary.get("overall"))
+            # Modelos com execução registrada, mas pontuação geral zero, ficam
+            # fora do quadro público até serem reavaliados.
+            if overall is not None and overall <= 0:
+                continue
             summary_metrics = model.get("summary_metrics", {}) or {}
             total_tokens = summary_metrics.get("total_tokens")
             if total_tokens is None:
